@@ -1,0 +1,109 @@
+name: assistant-stack
+
+x-app: &app
+  image: assistant-calendar:local
+  build: .
+
+x-owner: &owner
+  PGHOST: postgres
+  PGPORT: "5432"
+  PGDATABASE: assistant_mvp
+  PGUSER: assistant_owner
+  PGPASSWORD: ${STACK_DB_PASSWORD:?Run scripts/start.ps1 or scripts/start.sh first}
+  REDIS_URL: redis://redis:6379/0
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:eee6c6e1b0894fa4fe0075eb054af9fd1cf39a35321c2d4110626cfe506411fb
+    environment:
+      POSTGRES_DB: assistant_mvp
+      POSTGRES_USER: assistant_owner
+      POSTGRES_PASSWORD: ${STACK_DB_PASSWORD:?Missing STACK_DB_PASSWORD}
+    ports:
+      - "127.0.0.1:${STACK_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant_owner -d assistant_mvp"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.2-alpine@sha256:d1389b3f3f981460b9b0918c4d7390c6e9decb8c69b9f09a02e1b6fd7554ade7
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:${STACK_REDIS_PORT:-6380}:6379"
+    tmpfs: [/data]
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["python", "-m", "app.bootstrap"]
+    environment:
+      <<: *owner
+      APP_DB_PASSWORD: ${STACK_APP_PASSWORD:?Missing STACK_APP_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  mcp:
+    <<: *app
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: assistant_mvp
+      PGUSER: assistant_app
+      PGPASSWORD: ${STACK_APP_PASSWORD:?Missing STACK_APP_PASSWORD}
+      REDIS_URL: redis://redis:6379/0
+      MCP_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,mcp:*"
+    ports:
+      - "127.0.0.1:${STACK_MCP_PORT:-8001}:8001"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=4).read()"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  tests:
+    <<: *app
+    profiles: [tools]
+    command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+    environment:
+      <<: *owner
+      ASSISTANT_RUN_DB_TESTS: "1"
+      ASSISTANT_RUN_REDIS_TESTS: "1"
+      STACK_MCP_URL: http://mcp:8001/mcp
+      STACK_MCP_HEALTH_URL: http://mcp:8001/health
+      APP_DB_PASSWORD: ${STACK_APP_PASSWORD:?Missing STACK_APP_PASSWORD}
+    depends_on:
+      mcp:
+        condition: service_healthy
+
+  benchmark:
+    <<: *app
+    profiles: [tools]
+    command: ["python", "-m", "scripts.benchmark_indexes", "--output", "/reports/index_plans.json"]
+    environment: *owner
+    volumes:
+      - ./docs/reports:/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

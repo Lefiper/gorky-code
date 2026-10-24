@@ -1,0 +1,20 @@
+name: assistant-memory
+
+services:
+  redis:
+    # Зафиксирован проверенный образ Redis 8.2.10, а не изменяемый latest.
+    image: redis:8.2-alpine@sha256:d1389b3f3f981460b9b0918c4d7390c6e9decb8c69b9f09a02e1b6fd7554ade7
+    # Только временный контекст. Диск и восстановление истории не используются.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:${REDIS_BIND_PORT:-6379}:6379"
+    tmpfs:
+      - /data
+    restart: unless-stopped
+    mem_limit: 256m
+    pids_limit: 100
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

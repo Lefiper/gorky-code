@@ -14,5 +14,5 @@ def verify_init_data(init_data: str) -> int:
     if not hmac.compare_digest(expected, received_hash):
         raise HTTPException(403, "Invalid initData signature")
     user = json.loads(params["user"])
-    return user["id"]  # это и есть проверенный user_id
+    return user["id"]
     

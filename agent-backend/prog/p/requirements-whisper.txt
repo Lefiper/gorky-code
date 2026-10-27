@@ -1,0 +1,2 @@
+# Необязательно: запасной движок / сравнение (ENGINES=gigaam,whisper)
+faster-whisper

@@ -36,7 +36,7 @@ try {
         project = $projectName
         clean_archive = $true
         fresh_configuration = $true
-        integration_tests = '33 passed'
+        integration_tests = 'passed (see test output)'
         postgres_restart_persistence = 'passed'
         finished_at = [DateTime]::UtcNow.ToString('o')
     } | ConvertTo-Json

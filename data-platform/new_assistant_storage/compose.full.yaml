@@ -50,6 +50,7 @@ services:
     environment:
       <<: *owner
       APP_DB_PASSWORD: ${STACK_APP_PASSWORD:?Missing STACK_APP_PASSWORD}
+      API_DB_PASSWORD: ${STACK_API_PASSWORD:?Run the updated start script to generate STACK_API_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,6 +91,7 @@ services:
       STACK_MCP_URL: http://mcp:8001/mcp
       STACK_MCP_HEALTH_URL: http://mcp:8001/health
       APP_DB_PASSWORD: ${STACK_APP_PASSWORD:?Missing STACK_APP_PASSWORD}
+      API_DB_PASSWORD: ${STACK_API_PASSWORD:?Missing STACK_API_PASSWORD}
     depends_on:
       mcp:
         condition: service_healthy

@@ -83,6 +83,7 @@ def _serialize(row):
 
 
 class EventService:
+    columns = COLUMNS
     def __init__(self, settings: Settings):
         self.settings = settings
 
@@ -143,7 +144,7 @@ class EventService:
             clauses.append("to_tsvector('russian', name || ' ' || description) @@ plainto_tsquery('russian', %s)")
             params.append(text)
         # Здесь соединяются только постоянные SQL-фрагменты. Значения всегда в params.
-        query = f"SELECT {COLUMNS} FROM public.events WHERE " + " AND ".join(clauses)
+        query = f"SELECT {self.columns} FROM public.events WHERE " + " AND ".join(clauses)
         query += " ORDER BY event_at, id LIMIT %s OFFSET %s"
         params.extend((limit + 1, offset))
         with self._connection() as conn:

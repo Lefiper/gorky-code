@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+jiwer
+httpx
+# GigaAM-v3 ставим из репозитория (в PyPI может быть старая версия без v3).
+# Для надёжности закрепите конкретный коммит: ...GigaAM.git@<commit>
+# Extras [longform] нужны для аудио длиннее 25 секунд (pyannote.audio).
+gigaam[longform] @ git+https://github.com/salute-developers/GigaAM.git

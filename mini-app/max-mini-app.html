@@ -178,6 +178,15 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSys
 @keyframes breathe{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(91,138,240,.4)}50%{transform:scale(1.06);box-shadow:0 0 0 16px rgba(91,138,240,0)}}
 .vtr{background:var(--sur2);border-radius:var(--rs);padding:12px;font-size:13px;color:var(--mut);min-height:44px;margin-bottom:16px;font-style:italic}
 
+/* DEV BANNER */
+.dev-banner{position:fixed;top:56px;left:0;right:0;z-index:150;background:rgba(251,191,36,.12);border-bottom:1px solid rgba(251,191,36,.25);padding:5px 16px;font-size:11px;color:var(--ylw);display:none;align-items:center;gap:6px}
+.dev-banner.show{display:flex}
+.dev-banner svg{flex-shrink:0}
+/* AUTH SCREEN */
+.auth-screen{position:fixed;inset:0;background:var(--bg);z-index:999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;transition:opacity .3s}
+.auth-screen.hide{opacity:0;pointer-events:none}
+.auth-spin{width:36px;height:36px;border:3px solid var(--brd);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 /* FORM */
 .af{margin-bottom:12px}
 .af label{display:block;font-size:11px;color:var(--mut);margin-bottom:5px;font-weight:500}
@@ -193,6 +202,18 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSys
 </style>
 </head>
 <body>
+
+<!-- AUTH SCREEN (показывается пока идёт валидация initData) -->
+<div class="auth-screen" id="authScreen">
+  <div class="auth-spin"></div>
+  <div style="font-size:13px;color:var(--mut)">Авторизация...</div>
+</div>
+
+<!-- DEV BANNER (виден только в dev-режиме, вне MAX) -->
+<div class="dev-banner" id="devBanner">
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+  DEV-режим · user_id=<span id="devUserId">—</span> · подпись не проверяется
+</div>
 
 <!-- TOPBAR -->
 <header class="topbar">
@@ -907,8 +928,143 @@ var S = {
   },
 };
 
+// ══════════════════════════════════════════════════
+//  MAX BRIDGE + initData AUTH
+//  Документация: https://dev.max.ru/docs/mini-apps/
+// ══════════════════════════════════════════════════
+
+// Текущий авторизованный пользователь (заполняется после init)
+var currentUser = null;
+
+/**
+ * Парсит строку initData (URL-encoded query string) в объект.
+ * Пример: "user=%7B%22id%22%3A123%7D&hash=abc&auth_date=1700000000"
+ */
+function parseInitData(raw) {
+  var params = {};
+  raw.split('&').forEach(function(pair) {
+    var idx = pair.indexOf('=');
+    if (idx === -1) return;
+    var key = decodeURIComponent(pair.slice(0, idx));
+    var val = decodeURIComponent(pair.slice(idx + 1));
+    params[key] = val;
+  });
+  return params;
+}
+
+/**
+ * Инициализация MAX Bridge.
+ *
+ * В реальном MAX-окружении window.MaxApp (MAX Bridge SDK) присутствует
+ * и предоставляет initData — подписанную строку с данными пользователя.
+ *
+ * Схема проверки на бэкенде (Python-псевдокод):
+ *
+ *   import hmac, hashlib, urllib.parse
+ *
+ *   def verify_init_data(init_data: str, bot_token: str) -> bool:
+ *       params = dict(urllib.parse.parse_qsl(init_data))
+ *       received_hash = params.pop('hash', '')
+ *       # Сортируем оставшиеся пары ключ=значение
+ *       data_check = '\n'.join(f'{k}={v}' for k, v in sorted(params.items()))
+ *       secret = hmac.new(b'WebAppData', bot_token.encode(), hashlib.sha256).digest()
+ *       expected = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
+ *       return hmac.compare_digest(expected, received_hash)
+ *
+ * На фронте мы только передаём initData в заголовке каждого запроса:
+ *   fetch('/api/tasks', { headers: { 'X-Init-Data': rawInitData } })
+ * Бэкенд верифицирует подпись и извлекает user_id из поля user.
+ */
+function initMAX() {
+  var authEl   = document.getElementById('authScreen');
+  var bannerEl = document.getElementById('devBanner');
+  var devIdEl  = document.getElementById('devUserId');
+
+  // ── Режим 1: внутри MAX (Bridge доступен) ──────────
+  if (window.MaxApp && typeof window.MaxApp.initData === 'string' && window.MaxApp.initData.length > 0) {
+    var raw    = window.MaxApp.initData;          // подписанная строка
+    var params = parseInitData(raw);
+
+    try {
+      var user = JSON.parse(params.user || '{}');
+      currentUser = {
+        id:         user.id   || null,
+        first_name: user.first_name || 'Пользователь',
+        username:   user.username   || '',
+        raw:        raw,             // передаём в каждый запрос
+      };
+    } catch(e) {
+      currentUser = { id: null, first_name: 'Пользователь', username: '', raw: raw };
+    }
+
+    // Сообщаем MAX Bridge, что приложение готово (скрывает лоадер платформы)
+    if (typeof window.MaxApp.ready === 'function') {
+      window.MaxApp.ready();
+    }
+
+    // Скрываем экран авторизации и запускаем приложение
+    authEl.classList.add('hide');
+    setTimeout(function() { authEl.style.display = 'none'; }, 320);
+    startApp();
+
+  // ── Режим 2: dev-режим (браузер вне MAX) ───────────
+  } else {
+    // Локальный тест: используем фиктивный user_id
+    // Можно переопределить через ?user_id=<число> в URL
+    var urlParams  = new URLSearchParams(window.location.search);
+    var devUserId  = parseInt(urlParams.get('user_id'), 10) || 100001;
+
+    currentUser = {
+      id:         devUserId,
+      first_name: 'Dev-пользователь',
+      username:   'dev',
+      raw:        null,             // нет подписи — бэкенд должен отклонять без ?dev=1
+    };
+
+    // Показываем предупредительный баннер
+    devIdEl.textContent = devUserId;
+    bannerEl.classList.add('show');
+
+    // Скрываем экран авторизации
+    authEl.classList.add('hide');
+    setTimeout(function() { authEl.style.display = 'none'; }, 320);
+    startApp();
+  }
+}
+
+/**
+ * Хелпер: добавляет initData в заголовок каждого fetch-запроса.
+ * Использование вместо голого fetch():
+ *   apiFetch('/api/tasks').then(r => r.json()).then(...)
+ */
+function apiFetch(url, options) {
+  options = options || {};
+  options.headers = options.headers || {};
+  if (currentUser && currentUser.raw) {
+    // Бэкенд верифицирует подпись по MAX_BOT_TOKEN и извлекает user_id
+    options.headers['X-Init-Data'] = currentUser.raw;
+  } else {
+    // Dev-режим: передаём user_id без подписи (бэкенд принимает только при DEV=true)
+    options.headers['X-Init-Data-Dev-UserId'] = String(currentUser ? currentUser.id : '');
+  }
+  return fetch(url, options);
+}
+
 // ── ЗАПУСК ───────────────────────────────────────────
-renderHome();
+function startApp() {
+  renderHome();
+  // Пример замены моков на реальный API (раскомментировать при интеграции):
+  // apiFetch('/api/tasks?user_id='+currentUser.id)
+  //   .then(function(r){ return r.json(); })
+  //   .then(function(d){ tasks = d; renderHome(); });
+}
+
+// Ждём загрузки DOM, затем инициализируем MAX Bridge
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initMAX);
+} else {
+  initMAX();
+}
 </script>
 </body>
 </html>

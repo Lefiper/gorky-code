@@ -1,8 +1,0 @@
-{
-    "postgres_restart_persistence":  "passed",
-    "clean_archive":  true,
-    "integration_tests":  "33 passed",
-    "fresh_configuration":  true,
-    "finished_at":  "2026-10-24T16:11:43.7939896Z",
-    "project":  "assistant-check-e595052538"
-}

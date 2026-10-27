@@ -26,11 +26,11 @@ flowchart LR
 | PostgreSQL | 127.0.0.1:55432 | postgres:5432 |
 | Redis | redis://127.0.0.1:6380/0 | redis://redis:6379/0 |
 
-БД assistant_mvp, роль приложения assistant_app, пароль STACK_APP_PASSWORD
-из локального .env.docker. STACK_DB_PASSWORD — отдельный пароль владельца для
-миграций/тестов, в агента и HTTP API его передавать не нужно.
-Роль приложения имеет только SELECT/INSERT событий. Для будущих изменений
-статуса нужны согласованные методы и отдельная миграция прав.
+БД assistant_mvp. MCP: assistant_app / STACK_APP_PASSWORD, SELECT/INSERT событий.
+HTTP API: assistant_api / STACK_API_PASSWORD, SELECT/INSERT/DELETE событий,
+UPDATE только status; чтение/создание/смена timezone в user_profiles.
+Пароли находятся в своём локальном .env.docker. STACK_DB_PASSWORD — пароль
+владельца для миграций/тестов, в агента и HTTP API его передавать не нужно.
 
 Значения порта на компьютере можно изменить в .env.docker; внутренние порты
 контейнеров остаются прежними. Прежний compose.yaml запускает только Redis
@@ -51,27 +51,29 @@ namespace и пути импортов. Не копируйте только о�
 и confirmation.py. Для backend на другом языке нужен адаптер по тому же контракту.
 
 У LLM нет права выбирать user_id: backend подставляет его из авторизованного
-события бота. Текущее время и Europe/Moscow добавляет агент в свой prompt.
+события бота. Текущее время и пояс пользователя добавляет агент в свой prompt.
+Пояс синхронизируется ботом/API в user_profiles, а не остаётся только в SQLite.
 Историю system prompt не заменяет. При «да» агент должен знать, на какое
 предложение согласился пользователь, и передать его idempotency_key.
 
 ## Подключение HTTP API
 
-Читает те же public.events. Если API на Python, можно использовать EventService
-при объединении кода; иначе нужны параметризованные SQL по описанной схеме.
-Формат идентификатора пользователя, типы task/reminder/meeting, статусы
-pending/done/cancelled и timezone-aware даты должны совпадать с MCP.
+Использует public.events и user_profiles под ролью assistant_api. Если API на Python,
+можно использовать APIEventService из app/api_storage.py; иначе нужны
+параметризованные SQL по описанной схеме. Сопоставление title/desc/date/time/dur,
+UUID и дополнительных типов/статусов — в MINI_APP_CONTRACT.md.
 Список за день — [начало дня, начало следующего дня) в часовом поясе пользователя.
 Все запросы обязаны фильтровать по доверенному user_id. Проверку доступа делает API.
-Изменение/удаление событий этим модулем пока не предоставлено.
+update_event_status и delete_event готовы на уровне хранилища. HTTP PATCH/DELETE
+маршруты, авторизация и JSON-адаптер остаются за разработчиком API.
 
 ## Как объединить Docker-запуск
 
 Самый простой вариант для хакатона — один общий compose команды: перенести
 services postgres, redis, migrate, mcp из нашего compose.full.yaml и добавить
 agent, bot, api. Внутри одной сети работают адреса mcp/postgres/redis из таблицы.
-Агенту передать URL MCP и Redis; API — параметры assistant_app. Потребность в
-записи статусов сначала согласовать. Не передавать владельца БД всем сервисам.
+Агенту передать URL MCP и Redis; API — параметры assistant_api.
+Не передавать владельца БД всем сервисам и не выдавать пароль API браузеру.
 В другом Compose-проекте сеть автоматически не общая: подключите сервисы к
 общей external network или объедините compose-файлы. В браузере Mini App
 внутренние имена Docker недоступны — нужен адрес API.

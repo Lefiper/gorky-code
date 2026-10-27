@@ -62,7 +62,7 @@ def make_init_data(
 def make_settings(**overrides) -> Settings:
     values = {
         "app_env": "test",
-        "api_prefix": "/api/v1",
+        "api_prefix": "/api",
         "cors_origins": "*",
         "default_timezone": "Europe/Moscow",
         "pg_host": "127.0.0.1",

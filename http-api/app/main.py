@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import Settings
 from app.errors import ApiError
-from app.routers import events, health, me
+from app.routers import health, me, tasks, timezone
 from app.storage import EventRepository
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list(),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
             "Content-Type",
             "X-Max-InitData",
@@ -95,7 +95,8 @@ def create_app(
 
     app.include_router(health.router)
     app.include_router(me.router, prefix=settings.api_prefix)
-    app.include_router(events.router, prefix=settings.api_prefix)
+    app.include_router(tasks.router, prefix=settings.api_prefix)
+    app.include_router(timezone.router, prefix=settings.api_prefix)
 
     @app.get("/", include_in_schema=False)
     def root() -> dict:

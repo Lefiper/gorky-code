@@ -9,13 +9,13 @@ from fastapi import APIRouter, Depends, Header, Query, Response, status
 from app.auth import MaxUser
 from app.config import Settings
 from app.dependencies import get_current_user, get_repository, get_settings
-from app.errors import ValidationError
-from app.schemas import EventCreateIn, EventCreateOut, EventListOut, EventOut, EventType
+from app.errors import NotFoundError, ValidationError
+from app.schemas import EventCreateIn, EventCreateOut, EventListOut, EventOut, EventType, EventUpdateStatusIn
 from app.storage import EventRepository, day_bounds, normalize_range
 
 router = APIRouter(
-    prefix="/events",
-    tags=["events"],
+    prefix="/tasks",
+    tags=["tasks"],
     responses={
         401: {"description": "Нет или недействителен MAX initData."},
         503: {"description": "PostgreSQL недоступен."},
@@ -44,41 +44,19 @@ def _resolve_period(
 
 
 @router.get("", response_model=EventListOut, summary="События за день или период")
-def list_events(
-    date: Date | None = Query(
-        default=None,
-        description="День в часовом поясе timezone. Нельзя сочетать с from/to.",
-    ),
-    from_: DateTime | None = Query(
-        default=None,
-        alias="from",
-        description="Начало периода включительно, ISO 8601 с offset.",
-    ),
-    to: DateTime | None = Query(
-        default=None,
-        description="Конец периода исключительно, ISO 8601 с offset.",
-    ),
-    event_type: list[EventType] | None = Query(
-        default=None,
-        description="Фильтр типа; можно передать несколько раз.",
-    ),
-    timezone_name: str | None = Query(
-        default=None,
-        alias="timezone",
-        description="IANA-таймзона для date, по умолчанию Europe/Moscow.",
-    ),
+def list_tasks(
+    date: Date | None = Query(default=None, description="День в часовом поясе timezone."),
+    from_: DateTime | None = Query(default=None, alias="from", description="Начало периода включительно, ISO 8601 с offset."),
+    to: DateTime | None = Query(default=None, description="Конец периода исключительно, ISO 8601 с offset."),
+    event_type: list[EventType] | None = Query(default=None, description="Фильтр типа; можно передать несколько раз."),
+    timezone_name: str | None = Query(default=None, alias="timezone", description="IANA-таймзона для date."),
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     settings: Settings = Depends(get_settings),
     user: MaxUser = Depends(get_current_user),
     repository: EventRepository = Depends(get_repository),
 ) -> dict:
-    start, end = _resolve_period(
-        date,
-        from_,
-        to,
-        timezone_name or settings.default_timezone,
-    )
+    start, end = _resolve_period(date, from_, to, timezone_name or settings.default_timezone)
     return repository.list_events(
         user_id=user.id,
         start_time=start,
@@ -90,17 +68,10 @@ def list_events(
 
 
 @router.get("/search", response_model=EventListOut, summary="Полнотекстовый поиск событий")
-def search_events(
+def search_tasks(
     q: str = Query(min_length=1, max_length=1000, description="Поисковый текст."),
-    from_: DateTime | None = Query(
-        default=None,
-        alias="from",
-        description="Необязательное начало периода включительно.",
-    ),
-    to: DateTime | None = Query(
-        default=None,
-        description="Необязательный конец периода исключительно.",
-    ),
+    from_: DateTime | None = Query(default=None, alias="from", description="Необязательное начало периода включительно."),
+    to: DateTime | None = Query(default=None, description="Необязательный конец периода исключительно."),
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     user: MaxUser = Depends(get_current_user),
@@ -126,14 +97,10 @@ def search_events(
         409: {"description": "Idempotency-Key уже использован с другими данными."},
     },
 )
-def create_event(
+def create_task(
     payload: EventCreateIn,
     response: Response,
-    idempotency_key: str | None = Header(
-        default=None,
-        alias="Idempotency-Key",
-        description="Ключ одной операции; повтор с тем же ключом не создаёт дубль.",
-    ),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     user: MaxUser = Depends(get_current_user),
     repository: EventRepository = Depends(get_repository),
 ) -> dict:
@@ -143,6 +110,8 @@ def create_event(
         name=payload.name,
         event_at=payload.event_at,
         description=payload.description,
+        duration_minutes=payload.duration_minutes,
+        status=payload.status,
         idempotency_key=idempotency_key,
     )
     if not result["created"]:
@@ -150,17 +119,49 @@ def create_event(
     return result
 
 
-@router.get(
-    "/{event_id}",
-    response_model=EventOut,
-    summary="Событие по ID",
-    responses={
-        404: {"description": "Событие не найдено или принадлежит другому пользователю."}
-    },
-)
-def get_event(
+@router.get("/{event_id}", response_model=EventOut, summary="Событие по ID", responses={
+    404: {"description": "Событие не найдено или принадлежит другому пользователю."}
+})
+def get_task(
     event_id: UUID,
     user: MaxUser = Depends(get_current_user),
     repository: EventRepository = Depends(get_repository),
 ) -> dict:
     return repository.get_event_by_id(user.id, event_id)
+
+
+@router.patch(
+    "/{event_id}",
+    response_model=EventOut,
+    summary="Изменить статус события",
+    responses={
+        404: {"description": "Событие не найдено или принадлежит другому пользователю."},
+    },
+)
+def update_task_status(
+    event_id: UUID,
+    payload: EventUpdateStatusIn,
+    user: MaxUser = Depends(get_current_user),
+    repository: EventRepository = Depends(get_repository),
+) -> dict:
+    result = repository.update_event_status(user.id, event_id, payload.status)
+    if result is None:
+        raise NotFoundError()
+    return result
+
+
+@router.delete(
+    "/{event_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Удалить событие",
+    responses={
+        404: {"description": "Событие не найдено или принадлежит другому пользователю."},
+    },
+)
+def delete_task(
+    event_id: UUID,
+    user: MaxUser = Depends(get_current_user),
+    repository: EventRepository = Depends(get_repository),
+) -> None:
+    if not repository.delete_event(user.id, event_id):
+        raise NotFoundError()

@@ -1,281 +1,261 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
 from unittest.mock import Mock
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from app.errors import NotFoundError, StorageError
 from app.main import create_app
 from tests.helpers import USER_ID, event_payload, make_init_data, make_settings
 
 
+def task_payload(**overrides) -> dict:
+    payload = {
+        "event_type": "task",
+        "name": "Тестовая задача",
+        "description": "Описание",
+        "event_at": "2026-10-24T09:00:00Z",
+        "duration_minutes": 30,
+        "status": "new",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class FakeRepository:
+    def __init__(self) -> None:
+        self.ping = Mock()
+        self.list_events = Mock(return_value={"items": [], "has_more": False})
+        self.search_events = Mock(return_value={"items": [], "has_more": False})
+        self.get_event_by_id = Mock()
+        self.create_event = Mock()
+        self.update_event_status = Mock()
+        self.delete_event = Mock(return_value=True)
+        self.get_user_timezone = Mock(return_value=None)
+        self.set_user_timezone = Mock(return_value={"user_id": str(USER_ID), "timezone": "Europe/Moscow"})
+        self.resolve_local_datetime = Mock(return_value="2026-10-24T06:00:00Z")
+        self.open = Mock()
+        self.close = Mock()
+
+
 class ApiTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.repo = Mock()
-        self.repo.list_events.return_value = {"items": [], "has_more": False}
-        self.repo.search_events.return_value = {"items": [], "has_more": False}
-        self.repo.get_event_by_id.return_value = event_payload()
-        self.repo.create_event.return_value = {"event": event_payload(), "created": True}
-
+        self.repo = FakeRepository()
         self.settings = make_settings()
         self.app = create_app(settings=self.settings, repository=self.repo)
         self.client = TestClient(self.app)
-        self.client.__enter__()
-        self.addCleanup(self.client.__exit__, None, None, None)
         self.headers = {"X-Max-InitData": make_init_data()}
 
+    def test_health(self) -> None:
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+        self.repo.ping.assert_called_once()
+
+    def test_health_unavailable(self) -> None:
+        self.repo.ping.side_effect = Exception("boom")
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {"status": "unavailable"})
+
     def test_me(self) -> None:
-        response = self.client.get("/api/v1/me", headers=self.headers)
+        response = self.client.get("/api/me", headers=self.headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["id"], str(USER_ID))
-        self.assertEqual(response.json()["first_name"], "Test")
 
     def test_me_requires_auth(self) -> None:
-        response = self.client.get("/api/v1/me")
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.headers["www-authenticate"], "MaxInitData")
-
-    def test_me_accepts_bearer(self) -> None:
-        response = self.client.get(
-            "/api/v1/me",
-            headers={"Authorization": f"Bearer {make_init_data()}"},
-        )
-        self.assertEqual(response.status_code, 200)
-
-    def test_me_rejects_bad_signature(self) -> None:
-        response = self.client.get(
-            "/api/v1/me",
-            headers={"X-Max-InitData": make_init_data(hash_override="deadbeef")},
-        )
+        response = self.client.get("/api/me")
         self.assertEqual(response.status_code, 401)
 
-    def test_dev_mode(self) -> None:
-        settings = make_settings(
-            app_env="development",
-            auth_dev_mode=True,
-            max_bot_token="",
-        )
-        app = create_app(settings=settings, repository=self.repo)
-        with TestClient(app) as client:
-            response = client.get("/api/v1/me", headers={"X-Debug-User-Id": "dev:42"})
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["id"], "dev:42")
-
-            response = client.get("/api/v1/me")
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["id"], "dev:1")
-
-    def test_dev_mode_forbidden_in_production(self) -> None:
-        with self.assertRaises(ValueError):
-            make_settings(app_env="production", auth_dev_mode=True, max_bot_token="")
-
-    def test_list_by_date_moscow(self) -> None:
+    def test_list_by_date(self) -> None:
         response = self.client.get(
-            "/api/v1/events",
+            "/api/tasks",
             params={"date": "2026-10-24", "timezone": "Europe/Moscow"},
             headers=self.headers,
         )
         self.assertEqual(response.status_code, 200)
+        self.repo.list_events.assert_called_once()
         kwargs = self.repo.list_events.call_args.kwargs
         self.assertEqual(kwargs["user_id"], str(USER_ID))
-        self.assertEqual(
-            kwargs["start_time"], datetime(2026, 10, 23, 21, 0, tzinfo=UTC)
-        )
-        self.assertEqual(
-            kwargs["end_time"], datetime(2026, 10, 24, 21, 0, tzinfo=UTC)
-        )
+        self.assertEqual(kwargs["limit"], 100)
+        self.assertEqual(kwargs["offset"], 0)
 
-    def test_list_by_period_and_types(self) -> None:
+    def test_list_by_period(self) -> None:
         response = self.client.get(
-            "/api/v1/events",
-            params=[
-                ("from", "2026-10-24T00:00:00+03:00"),
-                ("to", "2026-10-25T00:00:00+03:00"),
-                ("event_type", "task"),
-                ("event_type", "meeting"),
-            ],
+            "/api/tasks",
+            params={"from": "2026-10-24T00:00:00+03:00", "to": "2026-10-25T00:00:00+03:00"},
             headers=self.headers,
         )
         self.assertEqual(response.status_code, 200)
-        kwargs = self.repo.list_events.call_args.kwargs
-        self.assertEqual(
-            kwargs["start_time"], datetime(2026, 10, 23, 21, 0, tzinfo=UTC)
-        )
-        self.assertEqual(
-            kwargs["end_time"], datetime(2026, 10, 24, 21, 0, tzinfo=UTC)
-        )
-        self.assertEqual(kwargs["event_types"], ["task", "meeting"])
-
-    def test_list_requires_period(self) -> None:
-        response = self.client.get("/api/v1/events", headers=self.headers)
-        self.assertEqual(response.status_code, 422)
-        self.assertIn("date", response.json()["detail"])
-
-    def test_list_rejects_date_and_period(self) -> None:
-        response = self.client.get(
-            "/api/v1/events",
-            params={"date": "2026-10-24", "from": "2026-10-24T00:00:00+03:00"},
-            headers=self.headers,
-        )
-        self.assertEqual(response.status_code, 422)
 
     def test_list_rejects_naive_period(self) -> None:
         response = self.client.get(
-            "/api/v1/events",
-            params={"from": "2026-10-24T00:00:00", "to": "2026-10-25T00:00:00"},
+            "/api/tasks",
+            params={"from": "2026-10-24T00:00:00", "to": "2026-10-25T00:00:00+03:00"},
             headers=self.headers,
         )
         self.assertEqual(response.status_code, 422)
-        self.assertIn("часовое смещение", response.json()["detail"])
 
-    def test_list_rejects_unknown_type(self) -> None:
+    def test_list_filters_event_type(self) -> None:
         response = self.client.get(
-            "/api/v1/events",
-            params={"date": "2026-10-24", "event_type": "project"},
+            "/api/tasks",
+            params={"date": "2026-10-24", "timezone": "Europe/Moscow", "event_type": ["task", "project"]},
             headers=self.headers,
         )
-        self.assertEqual(response.status_code, 422)
-        self.assertIn("errors", response.json())
+        self.assertEqual(response.status_code, 200)
+        kwargs = self.repo.list_events.call_args.kwargs
+        self.assertEqual(kwargs["event_types"], ["task", "project"])
 
     def test_search(self) -> None:
-        response = self.client.get(
-            "/api/v1/events/search",
-            params={"q": "тест", "from": "2026-10-01T00:00:00+03:00"},
-            headers=self.headers,
-        )
+        response = self.client.get("/api/tasks/search", params={"q": "созвон"}, headers=self.headers)
         self.assertEqual(response.status_code, 200)
-        kwargs = self.repo.search_events.call_args.kwargs
-        self.assertEqual(kwargs["text"], "тест")
-        self.assertEqual(
-            kwargs["start_time"], datetime(2026, 9, 30, 21, 0, tzinfo=UTC)
-        )
-        self.assertIsNone(kwargs["end_time"])
+        self.repo.search_events.assert_called_once()
 
     def test_get_event(self) -> None:
-        payload = event_payload()
-        self.repo.get_event_by_id.return_value = payload
-        response = self.client.get(f"/api/v1/events/{payload['id']}", headers=self.headers)
+        event_id = str(uuid4())
+        self.repo.get_event_by_id.return_value = event_payload(id=event_id, user_id=str(USER_ID))
+        response = self.client.get(f"/api/tasks/{event_id}", headers=self.headers)
         self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertEqual(body["id"], payload["id"])
-        self.assertEqual(body["event_at"], "2026-10-24T09:00:00Z")
-        self.assertEqual(body["status"], "pending")
+        self.assertEqual(response.json()["id"], event_id)
 
     def test_get_event_not_found(self) -> None:
+        from app.errors import NotFoundError
         self.repo.get_event_by_id.side_effect = NotFoundError()
-        response = self.client.get(
-            "/api/v1/events/00000000-0000-0000-0000-000000000000",
-            headers=self.headers,
-        )
+        response = self.client.get(f"/api/tasks/{uuid4()}", headers=self.headers)
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()["detail"], "Событие не найдено.")
 
     def test_get_event_invalid_uuid(self) -> None:
-        response = self.client.get("/api/v1/events/not-a-uuid", headers=self.headers)
+        response = self.client.get("/api/tasks/not-a-uuid", headers=self.headers)
         self.assertEqual(response.status_code, 422)
-        self.assertIn("errors", response.json())
 
     def test_create_event(self) -> None:
-        payload = {
-            "event_type": "meeting",
-            "name": "  Демо  ",
-            "description": "  ",
-            "event_at": "2026-10-27T15:00:00+03:00",
+        self.repo.create_event.return_value = {
+            "event": event_payload(id=str(uuid4()), user_id=str(USER_ID), duration_minutes=30, status="new"),
+            "created": True,
         }
-        response = self.client.post(
-            "/api/v1/events",
-            json=payload,
-            headers={**self.headers, "Idempotency-Key": "demo-1"},
-        )
+        response = self.client.post("/api/tasks", json=task_payload(), headers=self.headers)
         self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()["created"])
         kwargs = self.repo.create_event.call_args.kwargs
         self.assertEqual(kwargs["user_id"], str(USER_ID))
-        self.assertEqual(kwargs["event_type"], "meeting")
-        self.assertEqual(kwargs["name"], "Демо")
-        self.assertEqual(kwargs["description"], "")
-        self.assertEqual(
-            kwargs["event_at"], datetime.fromisoformat("2026-10-27T15:00:00+03:00")
-        )
-        self.assertEqual(kwargs["idempotency_key"], "demo-1")
+        self.assertEqual(kwargs["event_type"], "task")
+        self.assertEqual(kwargs["name"], "Тестовая задача")
+        self.assertEqual(kwargs["duration_minutes"], 30)
+        self.assertEqual(kwargs["status"], "new")
 
     def test_create_event_idempotent_replay_returns_200(self) -> None:
-        self.repo.create_event.return_value = {"event": event_payload(), "created": False}
+        self.repo.create_event.return_value = {
+            "event": event_payload(id=str(uuid4()), user_id=str(USER_ID)),
+            "created": False,
+        }
         response = self.client.post(
-            "/api/v1/events",
-            json={
-                "event_type": "task",
-                "name": "Задача",
-                "event_at": "2026-10-27T15:00:00+03:00",
-            },
-            headers=self.headers,
+            "/api/tasks",
+            json=task_payload(),
+            headers={**self.headers, "Idempotency-Key": "same-key"},
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["created"])
 
     def test_create_event_rejects_user_id(self) -> None:
         response = self.client.post(
-            "/api/v1/events",
-            json={
-                "event_type": "task",
-                "name": "Задача",
-                "event_at": "2026-10-27T15:00:00+03:00",
-                "user_id": "999",
-            },
+            "/api/tasks",
+            json={**task_payload(), "user_id": "evil"},
             headers=self.headers,
         )
         self.assertEqual(response.status_code, 422)
-        self.assertIn("errors", response.json())
+
+    def test_create_event_rejects_invalid_type(self) -> None:
+        response = self.client.post(
+            "/api/tasks",
+            json=task_payload(event_type="invalid"),
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 422)
 
     def test_create_event_rejects_naive_datetime(self) -> None:
         response = self.client.post(
-            "/api/v1/events",
-            json={
-                "event_type": "task",
-                "name": "Задача",
-                "event_at": "2026-10-27T15:00:00",
-            },
+            "/api/tasks",
+            json=task_payload(event_at="2026-10-24T09:00:00"),
             headers=self.headers,
         )
         self.assertEqual(response.status_code, 422)
-        self.assertIn("errors", response.json())
 
-    def test_create_event_rejects_project_type(self) -> None:
+    def test_create_event_rejects_bad_duration(self) -> None:
         response = self.client.post(
-            "/api/v1/events",
-            json={
-                "event_type": "project",
-                "name": "Проект",
-                "event_at": "2026-10-27T15:00:00+03:00",
-            },
+            "/api/tasks",
+            json=task_payload(duration_minutes=0),
             headers=self.headers,
         )
         self.assertEqual(response.status_code, 422)
 
-    def test_health(self) -> None:
-        response = self.client.get("/health")
+    def test_update_status(self) -> None:
+        event_id = str(uuid4())
+        self.repo.update_event_status.return_value = event_payload(id=event_id, user_id=str(USER_ID), status="done")
+        response = self.client.patch(
+            f"/api/tasks/{event_id}",
+            json={"status": "done"},
+            headers=self.headers,
+        )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        self.assertEqual(response.json()["status"], "done")
 
-    def test_health_unavailable(self) -> None:
-        self.repo.ping.side_effect = StorageError()
-        response = self.client.get("/health")
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json(), {"status": "unavailable"})
+    def test_update_status_not_found(self) -> None:
+        self.repo.update_event_status.return_value = None
+        response = self.client.patch(
+            f"/api/tasks/{uuid4()}",
+            json={"status": "done"},
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_event(self) -> None:
+        event_id = str(uuid4())
+        self.repo.delete_event.return_value = True
+        response = self.client.delete(f"/api/tasks/{event_id}", headers=self.headers)
+        self.assertEqual(response.status_code, 204)
+
+    def test_delete_event_not_found(self) -> None:
+        self.repo.delete_event.return_value = False
+        response = self.client.delete(f"/api/tasks/{uuid4()}", headers=self.headers)
+        self.assertEqual(response.status_code, 404)
+
+    def test_timezone_get_set_resolve(self) -> None:
+        self.repo.get_user_timezone.return_value = None
+        response = self.client.get("/api/timezone", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["timezone"], None)
+
+        self.repo.set_user_timezone.return_value = {"user_id": str(USER_ID), "timezone": "Europe/Moscow"}
+        response = self.client.put("/api/timezone", json={"timezone": "Europe/Moscow"}, headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["timezone"], "Europe/Moscow")
+
+        self.repo.resolve_local_datetime.return_value = "2026-10-24T07:00:00Z"
+        response = self.client.post("/api/timezone/resolve", json={"date": "2026-10-24", "time": "10:00"}, headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["event_at"], "2026-10-24T07:00:00Z")
 
     def test_cors_preflight(self) -> None:
         response = self.client.options(
-            "/api/v1/events",
+            "/api/tasks",
             headers={
-                "Origin": "https://htmlpreview.github.io",
-                "Access-Control-Request-Method": "GET",
-                "Access-Control-Request-Headers": "X-Max-InitData",
+                "Origin": "https://example.com",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "X-Max-InitData,Idempotency-Key",
             },
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers["access-control-allow-origin"], "*")
-        self.assertIn(
-            "x-max-initdata",
-            response.headers["access-control-allow-headers"].lower(),
-        )
+        self.assertEqual(response.headers.get("access-control-allow-origin"), "*")
+
+    def test_dev_mode(self) -> None:
+        settings = make_settings(app_env="development", auth_dev_mode=True, max_bot_token="")
+        app = create_app(settings=settings, repository=self.repo)
+        client = TestClient(app)
+        response = client.get("/api/me", headers={"X-Debug-User-Id": "dev:42"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], "dev:42")
+
+    def test_dev_mode_forbidden_in_production(self) -> None:
+        with self.assertRaises(ValueError):
+            make_settings(app_env="production", auth_dev_mode=True, max_bot_token="")

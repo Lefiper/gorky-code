@@ -1,19 +1,21 @@
-"""Доступ к public.events.
+"""Доступ к public.events и public.user_profiles.
 
-SQL и правила совпадают с data-platform/assistant-storage/app/events.py.
-При изменении схемы или контракта обновляйте оба места.
+SQL и правила совпадают с data-platform/new_assistant_storage (app/events.py,
+app/api_storage.py). При изменении схемы или контракта обновляйте оба места.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, time, timedelta
+from datetime import UTC, timedelta
 from datetime import date as Date
 from datetime import datetime as DateTime
+from datetime import time as Time
 from uuid import UUID, uuid4
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import psycopg
 from psycopg.rows import dict_row
@@ -21,19 +23,10 @@ from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
 from app.errors import ConflictError, NotFoundError, StorageError, ValidationError
 
-EVENT_TYPES = ("task", "reminder", "meeting")
-EVENT_STATUSES = ("pending", "done", "cancelled")
+API_EVENT_TYPES = ("task", "reminder", "meeting", "project")
+API_STATUSES = ("pending", "new", "progress", "done", "blocked", "cancelled")
 COLUMNS = "id, user_id, event_type, name, description, event_at, created_at, status"
-
-
-@dataclass(frozen=True)
-class PgConfig:
-    host: str
-    port: int
-    dbname: str
-    user: str
-    password: str = field(repr=False)
-    connect_timeout: int = 5
+API_COLUMNS = COLUMNS + ", duration_minutes"
 
 
 def _text(value: object, field: str, maximum: int | None = None, allow_empty: bool = False) -> str:
@@ -45,10 +38,14 @@ def _text(value: object, field: str, maximum: int | None = None, allow_empty: bo
     return value
 
 
-def _event_type(value: object) -> str:
-    if not isinstance(value, str) or value not in EVENT_TYPES:
-        raise ValidationError("event_type: допустимы task, reminder, meeting.")
+def _choice(value: object, allowed: set[str], field: str) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise ValidationError(f"{field}: допустимы " + ", ".join(sorted(allowed)))
     return value
+
+
+def _event_type(value: object) -> str:
+    return _choice(value, set(API_EVENT_TYPES), "event_type")
 
 
 def _event_types(values: Sequence[str] | str | None) -> list[str] | None:
@@ -59,6 +56,19 @@ def _event_types(values: Sequence[str] | str | None) -> list[str] | None:
     result = [_event_type(value) for value in values]
     deduplicated = list(dict.fromkeys(result))
     return deduplicated or None
+
+
+def _status(value: object) -> str:
+    return _choice(value, set(API_STATUSES), "status")
+
+
+def _uuid(value: object) -> UUID:
+    if not isinstance(value, str):
+        raise ValidationError("event_id: нужна строка UUID, а не числовой ID.")
+    try:
+        return UUID(value)
+    except ValueError:
+        raise ValidationError("event_id: некорректный UUID.") from None
 
 
 def _time(value: object, field: str) -> DateTime:
@@ -96,8 +106,15 @@ def normalize_range(
     end_time: object | None,
     required: bool = False,
 ) -> tuple[DateTime | None, DateTime | None]:
-    """Публичная обёртка: проверяет даты и приводит их к UTC."""
     return _range(start_time, end_time, required=required)
+
+
+def _duration(value: object | None) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or isinstance(value, bool) or not 1 <= value <= 2147483647:
+        raise ValidationError("duration_minutes: положительное целое число минут или null.")
+    return value
 
 
 def _pagination(limit: int, offset: int) -> None:
@@ -112,18 +129,53 @@ def _serialize(row: dict) -> dict:
     result["id"] = str(result["id"])
     for column in ("event_at", "created_at"):
         result[column] = result[column].astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if "duration_minutes" not in result:
+        result["duration_minutes"] = None
     return result
 
 
 def day_bounds(day: Date, timezone_name: str) -> tuple[DateTime, DateTime]:
-    """Границы дня [00:00, 00:00 следующего дня) в часовом поясе IANA."""
     try:
         tz = ZoneInfo(timezone_name)
     except Exception:
         raise ValidationError("timezone: неизвестный часовой пояс IANA.") from None
-    start = DateTime.combine(day, time.min, tzinfo=tz)
-    end = DateTime.combine(day + timedelta(days=1), time.min, tzinfo=tz)
+    start = DateTime.combine(day, Time.min, tzinfo=tz)
+    end = DateTime.combine(day + timedelta(days=1), Time.min, tzinfo=tz)
     return start.astimezone(UTC), end.astimezone(UTC)
+
+
+def local_datetime_to_iso(date: object, time: object, timezone: str) -> str:
+    """Без угадывания несуществующего/двойного времени при переходах DST."""
+    try:
+        if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            raise ValueError
+        if not isinstance(time, str) or not re.fullmatch(r"\d{2}:\d{2}(:\d{2})?", time):
+            raise ValueError
+        naive = DateTime.combine(Date.fromisoformat(date), Time.fromisoformat(time))
+        zone = ZoneInfo(timezone)
+        candidates = set()
+        for fold in (0, 1):
+            utc = naive.replace(tzinfo=zone, fold=fold).astimezone(UTC)
+            if utc.astimezone(zone).replace(tzinfo=None) == naive:
+                candidates.add(utc)
+    except (ValueError, TypeError, ZoneInfoNotFoundError, OverflowError):
+        raise ValidationError("Проверьте date, time и IANA timezone.") from None
+    if len(candidates) != 1:
+        raise ValidationError(
+            "Местное время неоднозначно или не существует из-за смены часового пояса. "
+            "Уточните время/смещение."
+        )
+    return candidates.pop().isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class PgConfig:
+    host: str
+    port: int
+    dbname: str
+    user: str
+    password: str = field(repr=False)
+    connect_timeout: int = 5
 
 
 class EventRepository:
@@ -175,36 +227,43 @@ class EventRepository:
         event_at: object,
         description: str = "",
         idempotency_key: str | None = None,
+        *,
+        duration_minutes: int | None = None,
+        status: str = "new",
     ) -> dict:
         user_id = _text(user_id, "user_id")
         event_type = _event_type(event_type)
+        status = _status(status)
         name = _text(name, "name", 200)
         description = _text(description, "description", 10000, allow_empty=True)
         event_at_utc = _time(event_at, "event_at")
+        duration = _duration(duration_minutes)
         key = _text(idempotency_key, "idempotency_key", 200) if idempotency_key is not None else None
 
         with self._connection() as conn:
             row = conn.execute(
                 f"""INSERT INTO public.events
-                (id, user_id, event_type, name, description, event_at, idempotency_key)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (id, user_id, event_type, name, description, event_at, idempotency_key, duration_minutes, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_id, idempotency_key) DO NOTHING
-                RETURNING {COLUMNS}""",
-                (uuid4(), user_id, event_type, name, description, event_at_utc, key),
+                RETURNING {API_COLUMNS}""",
+                (uuid4(), user_id, event_type, name, description, event_at_utc, key, duration, status),
             ).fetchone()
             created = row is not None
             if not created:
                 row = conn.execute(
-                    f"SELECT {COLUMNS} FROM public.events WHERE user_id = %s AND idempotency_key = %s",
+                    f"SELECT {API_COLUMNS} FROM public.events WHERE user_id = %s AND idempotency_key = %s",
                     (user_id, key),
                 ).fetchone()
                 if row is None:
                     raise StorageError("Не удалось прочитать результат повторной операции.")
-                if (row["event_type"], row["name"], row["description"], row["event_at"]) != (
+                if (row["event_type"], row["name"], row["description"], row["event_at"], row["duration_minutes"], row["status"]) != (
                     event_type,
                     name,
                     description,
                     event_at_utc,
+                    duration,
+                    status,
                 ):
                     raise ConflictError("idempotency_key уже использован с другими данными.")
 
@@ -240,22 +299,73 @@ class EventRepository:
         _pagination(limit, offset)
         return self._select(user_id, start, end, limit, offset, text=text)
 
-    def get_event_by_id(self, user_id: str, event_id: UUID | str) -> dict:
+    def get_event_by_id(self, user_id: str, event_id: object) -> dict:
         user_id = _text(user_id, "user_id")
-        try:
-            event_uuid = UUID(str(event_id))
-        except (ValueError, AttributeError):
-            raise ValidationError("event_id: ожидается UUID.") from None
-
+        event_uuid = _uuid(event_id)
         with self._connection() as conn:
             row = conn.execute(
-                f"SELECT {COLUMNS} FROM public.events WHERE user_id = %s AND id = %s",
+                f"SELECT {API_COLUMNS} FROM public.events WHERE user_id = %s AND id = %s",
                 (user_id, event_uuid),
             ).fetchone()
-
         if row is None:
             raise NotFoundError()
         return _serialize(row)
+
+    def update_event_status(self, user_id: str, event_id: object, status: str) -> dict | None:
+        user_id = _text(user_id, "user_id")
+        event_uuid = _uuid(event_id)
+        status = _status(status)
+        with self._connection() as conn:
+            row = conn.execute(
+                f"""UPDATE public.events SET status = %s
+                WHERE user_id = %s AND id = %s RETURNING {API_COLUMNS}""",
+                (status, user_id, event_uuid),
+            ).fetchone()
+        return _serialize(row) if row is not None else None
+
+    def delete_event(self, user_id: str, event_id: object) -> bool:
+        user_id = _text(user_id, "user_id")
+        event_uuid = _uuid(event_id)
+        with self._connection() as conn:
+            row = conn.execute(
+                "DELETE FROM public.events WHERE user_id = %s AND id = %s RETURNING id",
+                (user_id, event_uuid),
+            ).fetchone()
+        return row is not None
+
+    def set_user_timezone(self, user_id: str, timezone: str) -> dict:
+        user_id = _text(user_id, "user_id")
+        timezone = _text(timezone, "timezone", 100)
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValidationError("timezone: нужен IANA-пояс, например Europe/Moscow.") from None
+        with self._connection() as conn:
+            row = conn.execute(
+                """INSERT INTO public.user_profiles (user_id, timezone)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET timezone = EXCLUDED.timezone, updated_at = now()
+                RETURNING user_id, timezone""",
+                (user_id, timezone),
+            ).fetchone()
+        return dict(row)
+
+    def get_user_timezone(self, user_id: str) -> str | None:
+        user_id = _text(user_id, "user_id")
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT timezone FROM public.user_profiles WHERE user_id = %s",
+                (user_id,),
+            ).fetchone()
+        return row["timezone"] if row is not None else None
+
+    def resolve_local_datetime(self, user_id: str, date: str, time: str) -> str:
+        timezone = self.get_user_timezone(user_id)
+        if timezone is None:
+            raise ValidationError(
+                "Часовой пояс пользователя неизвестен. Синхронизируйте его из бота или уточните у пользователя."
+            )
+        return local_datetime_to_iso(date, time, timezone)
 
     def _select(
         self,
@@ -285,8 +395,7 @@ class EventRepository:
             )
             params.append(text)
 
-        # Соединяются только постоянные SQL-фрагменты; значения всегда в params.
-        query = f"SELECT {COLUMNS} FROM public.events WHERE " + " AND ".join(clauses)
+        query = "SELECT " + API_COLUMNS + " FROM public.events WHERE " + " AND ".join(clauses)
         query += " ORDER BY event_at, id LIMIT %s OFFSET %s"
         params.extend((limit + 1, offset))
 

@@ -4,7 +4,7 @@ import unittest
 from datetime import UTC, date, datetime, timedelta
 
 from app.errors import ValidationError
-from app.storage import day_bounds, normalize_range
+from app.storage import day_bounds, local_datetime_to_iso, normalize_range
 
 
 class DayBoundsTest(unittest.TestCase):
@@ -47,3 +47,16 @@ class NormalizeRangeTest(unittest.TestCase):
                 datetime(2026, 10, 24, tzinfo=UTC),
                 required=True,
             )
+
+
+class LocalDatetimeTest(unittest.TestCase):
+    def test_moscow(self) -> None:
+        self.assertEqual(local_datetime_to_iso("2030-01-02", "10:00", "Europe/Moscow"), "2030-01-02T07:00:00Z")
+
+    def test_dst_ambiguous(self) -> None:
+        with self.assertRaises(ValidationError):
+            local_datetime_to_iso("2026-10-25", "02:30", "Europe/Berlin")
+
+    def test_invalid_date(self) -> None:
+        with self.assertRaises(ValidationError):
+            local_datetime_to_iso("2030-02-30", "10:00", "Europe/Moscow")

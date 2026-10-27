@@ -23,14 +23,14 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = Field(
         default="development", validation_alias="APP_ENV"
     )
-    api_prefix: str = Field(default="/api/v1", validation_alias="API_PREFIX")
+    api_prefix: str = Field(default="/api", validation_alias="API_PREFIX")
     cors_origins: str = Field(default="*", validation_alias="CORS_ORIGINS")
     default_timezone: str = Field(default="Europe/Moscow", validation_alias="DEFAULT_TIMEZONE")
 
     pg_host: str = Field(default="127.0.0.1", validation_alias="PGHOST")
     pg_port: int = Field(default=55432, validation_alias="PGPORT")
     pg_database: str = Field(default="assistant_mvp", validation_alias="PGDATABASE")
-    pg_user: str = Field(default="assistant_app", validation_alias="PGUSER")
+    pg_user: str = Field(default="assistant_api", validation_alias="PGUSER")
     pg_password: SecretStr = Field(validation_alias="PGPASSWORD")
     pg_connect_timeout: int = Field(default=5, validation_alias="PGCONNECT_TIMEOUT")
 

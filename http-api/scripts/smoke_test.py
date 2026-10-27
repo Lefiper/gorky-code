@@ -43,44 +43,58 @@ def main() -> int:
             response.raise_for_status()
 
         payload = {
-            "event_type": "meeting",
+            "event_type": "project",
             "name": "Smoke-тест HTTP API",
-            "description": "Проверка create/list/get/search",
+            "description": "Проверка create/list/get/search/patch/delete",
             "event_at": "2030-01-02T15:00:00+03:00",
+            "duration_minutes": 45,
+            "status": "new",
         }
         response = client.post(
-            base_url + "/api/v1/events",
+            base_url + "/api/tasks",
             json=payload,
             headers={**headers, "Idempotency-Key": f"smoke-{uuid4()}"},
         )
-        print(f"POST /api/v1/events -> {response.status_code} {response.text}")
+        print(f"POST /api/tasks -> {response.status_code} {response.text}")
         response.raise_for_status()
         event_id = response.json()["event"]["id"]
 
         response = client.get(
-            base_url + "/api/v1/events",
+            base_url + "/api/tasks",
             params={"date": "2030-01-02", "timezone": "Europe/Moscow"},
             headers=headers,
         )
         print(
-            f"GET /api/v1/events -> {response.status_code} "
+            f"GET /api/tasks -> {response.status_code} "
             f"{json.dumps(response.json(), ensure_ascii=False)}"
         )
         response.raise_for_status()
 
         response = client.get(
-            base_url + f"/api/v1/events/{event_id}",
+            base_url + f"/api/tasks/{event_id}",
             headers=headers,
         )
-        print(f"GET /api/v1/events/{event_id} -> {response.status_code} {response.text}")
+        print(f"GET /api/tasks/{event_id} -> {response.status_code} {response.text}")
+        response.raise_for_status()
+
+        response = client.patch(
+            base_url + f"/api/tasks/{event_id}",
+            json={"status": "done"},
+            headers=headers,
+        )
+        print(f"PATCH /api/tasks/{event_id} -> {response.status_code} {response.text}")
         response.raise_for_status()
 
         response = client.get(
-            base_url + "/api/v1/events/search",
+            base_url + "/api/tasks/search",
             params={"q": "Smoke-тест"},
             headers=headers,
         )
-        print(f"GET /api/v1/events/search -> {response.status_code} {response.text}")
+        print(f"GET /api/tasks/search -> {response.status_code} {response.text}")
+        response.raise_for_status()
+
+        response = client.delete(base_url + f"/api/tasks/{event_id}", headers=headers)
+        print(f"DELETE /api/tasks/{event_id} -> {response.status_code}")
         response.raise_for_status()
 
     print("OK")

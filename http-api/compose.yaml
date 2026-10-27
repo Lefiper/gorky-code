@@ -1,0 +1,36 @@
+# Запускать после data-platform/assistant-storage/compose.full.yaml:
+#   docker compose -f ../data-platform/assistant-storage/compose.full.yaml up -d
+#   docker compose up --build -d
+#
+# API подключается к общей сети assistant-stack_default и использует
+# роль assistant_app (SELECT/INSERT), а не владельца БД.
+name: gorky-http-api
+
+services:
+  api:
+    build: .
+    env_file: .env
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+    ports:
+      - "127.0.0.1:${API_PORT:-8002}:8002"
+    networks:
+      - assistant
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=4).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+networks:
+  assistant:
+    external: true
+    name: assistant-stack_default

@@ -457,24 +457,107 @@ function isOverdue(ds, status) {
   return new Date(ds+'T00:00:00') < new Date(isoToday()+'T00:00:00');
 }
 
+// ── КОНФИГУРАЦИЯ API ──────────────────────────────
+// Меняй BASE_URL под своё окружение:
+//   локально:    'http://localhost:8000'
+//   прод:        'https://api.your-domain.ru'
+var BASE_URL = 'http://localhost:8000';
+
 // ── ДАННЫЕ ────────────────────────────────────────
-// В реальном проекте tasks загружаются через:
-//   fetch('/api/tasks').then(r=>r.json()).then(d=>{ tasks=d; render(); })
-var tasks = [
-  {id:1, title:'Подготовить презентацию для инвесторов', date:'2026-10-23', status:'progress', type:'task'},
-  {id:2, title:'Написать unit-тесты для API',            date:'2026-10-24', status:'new',      type:'task'},
-  {id:3, title:'Настроить Redis кэш',                    date:'2026-10-23', status:'done',     type:'task'},
-  {id:4, title:'Интеграция GigaChat API',                date:'2026-10-26', status:'blocked',  type:'task'},
-  {id:5, title:'Настроить PostgreSQL + индексы',         date:'2026-10-21', status:'done',     type:'task'},
-  {id:6, title:'Sync с командой',          date:'2026-10-24', status:'progress', type:'meeting', time:'11:00', dur:'45м', desc:'Архитектура ASR + LangChain'},
-  {id:7, title:'Демо для организаторов',   date:'2026-10-25', status:'new',      type:'meeting', time:'15:00', dur:'60м', desc:'Работающий прототип'},
-  {id:8, title:'Kick-off встреча команды', date:'2026-10-22', status:'done',     type:'meeting', time:'10:00', dur:'30м'},
-  {id:9,  title:'MAX Bot — интеграция ASR',          date:'2026-10-27', status:'progress', type:'project'},
-  {id:10, title:'Agent Backend — LangChain pipeline',date:'2026-10-28', status:'progress', type:'project'},
-  {id:11, title:'MCP Server — FastMCP endpoints',    date:'2026-10-29', status:'new',      type:'project'},
-  {id:12, title:'MAX Mini App — финальное тестирование', date:'2026-10-30', status:'new',  type:'project'},
-];
-var nextId = 13;
+// Заполняются из API при старте; моки используются
+// только если API недоступен (dev-fallback ниже).
+var tasks = [];
+var _apiLoaded = false;
+
+// ── МАППИНГ: API EventOut → объект фронта ─────────
+// API возвращает:
+//   id (UUID), event_type, name, description,
+//   event_at (ISO 8601 UTC), status, duration_minutes
+// Фронт хранит:
+//   id, type, title, desc, date (YYYY-MM-DD),
+//   time (HH:MM), dur (строка), status
+function mapEvent(ev) {
+  var dt = new Date(ev.event_at);
+  // Дата и время в локальном часовом поясе пользователя
+  var date = dt.getFullYear() + '-'
+    + String(dt.getMonth()+1).padStart(2,'0') + '-'
+    + String(dt.getDate()).padStart(2,'0');
+  var time = String(dt.getHours()).padStart(2,'0') + ':'
+    + String(dt.getMinutes()).padStart(2,'0');
+  return {
+    id:     ev.id,                          // UUID строка
+    type:   ev.event_type,                  // task|meeting|project|reminder
+    title:  ev.name,
+    desc:   ev.description || '',
+    date:   date,
+    time:   time,
+    dur:    ev.duration_minutes ? ev.duration_minutes + 'м' : null,
+    status: ev.status,                      // new|progress|done|blocked|…
+  };
+}
+
+// ── МАППИНГ: поля формы → API EventCreateIn ───────
+// event_at должен содержать timezone offset (+03:00 для МСК)
+function toEventAt(dateStr, timeStr) {
+  var tzOffset = -(new Date().getTimezoneOffset()); // минуты, например 180 для MSK
+  var sign = tzOffset >= 0 ? '+' : '-';
+  var absOff = Math.abs(tzOffset);
+  var offStr = sign + String(Math.floor(absOff/60)).padStart(2,'0')
+             + ':' + String(absOff%60).padStart(2,'0');
+  var t = timeStr || '00:00';
+  return dateStr + 'T' + t + ':00' + offStr;
+}
+
+// ── ЗАГРУЗКА ЗАДАЧ С API ──────────────────────────
+function loadTasks(callback) {
+  var today = isoToday();
+  // Загружаем события за 14 дней (неделя назад + неделя вперёд)
+  // чтобы покрыть неделю-полосу и календарь
+  var tzOffset = -(new Date().getTimezoneOffset());
+  var sign = tzOffset >= 0 ? '+' : '-';
+  var absOff = Math.abs(tzOffset);
+  var offStr = sign + String(Math.floor(absOff/60)).padStart(2,'0')
+             + ':' + String(absOff%60).padStart(2,'0');
+
+  var d = new Date(); d.setDate(d.getDate() - 7);
+  var fromStr = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'
+    +String(d.getDate()).padStart(2,'0')+'T00:00:00'+offStr;
+  var d2 = new Date(); d2.setDate(d2.getDate() + 30);
+  var toStr = d2.getFullYear()+'-'+String(d2.getMonth()+1).padStart(2,'0')+'-'
+    +String(d2.getDate()).padStart(2,'0')+'T23:59:59'+offStr;
+
+  var url = BASE_URL+'/tasks?from='+encodeURIComponent(fromStr)
+    +'&to='+encodeURIComponent(toStr)+'&limit=100';
+
+  apiFetch(url)
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP '+r.status);
+      return r.json();
+    })
+    .then(function(data) {
+      // data = { items: [...], has_more: bool }
+      tasks = (data.items || []).map(mapEvent);
+      _apiLoaded = true;
+      if (callback) callback();
+    })
+    .catch(function(err) {
+      console.warn('API недоступен, используются моковые данные:', err);
+      // DEV-fallback: моковые данные если API не запущен
+      if (!_apiLoaded) {
+        tasks = [
+          {id:'mock-1', title:'Подготовить презентацию',      date:'2026-10-27', status:'progress', type:'task'},
+          {id:'mock-2', title:'Написать unit-тесты для API',   date:'2026-10-28', status:'new',      type:'task'},
+          {id:'mock-3', title:'Настроить Redis кэш',           date:'2026-10-26', status:'done',     type:'task'},
+          {id:'mock-4', title:'Интеграция GigaChat API',       date:'2026-10-29', status:'blocked',  type:'task'},
+          {id:'mock-5', title:'Sync с командой',               date:'2026-10-28', status:'progress', type:'meeting', time:'11:00', dur:'45м', desc:'Архитектура ASR'},
+          {id:'mock-6', title:'Демо для организаторов',        date:'2026-10-29', status:'new',      type:'meeting', time:'15:00', dur:'60м', desc:'Прототип'},
+          {id:'mock-7', title:'MAX Bot — интеграция ASR',      date:'2026-10-30', status:'progress', type:'project'},
+          {id:'mock-8', title:'Agent Backend — LangChain',     date:'2026-10-31', status:'new',      type:'project'},
+        ];
+      }
+      if (callback) callback();
+    });
+}
 
 var notifs = [
   {id:1, title:'Задача просрочена',      sub:'«Презентация» — срок истёк вчера', time:'9:14',  read:false, icon:'alert', cls:'ni-r'},
@@ -776,10 +859,16 @@ var S = {
   toggle: function(id) {
     var t = tasks.find(function(x){return x.id===id;});
     if(!t) return;
-    t.status = t.status==='done' ? 'new' : 'done';
-    // ИНТЕГРАЦИЯ: fetch('/api/tasks/'+id, {method:'PATCH', body:JSON.stringify({status:t.status})})
+    var newStatus = t.status==='done' ? 'new' : 'done';
+    t.status = newStatus; // оптимистично меняем сразу
     if(state.page==='home')  renderHome();
     if(state.page==='tasks') renderTasks();
+    // Синхронизируем с API
+    apiFetch(BASE_URL+'/tasks/'+id, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({status: newStatus}),
+    }).catch(function(err){ console.warn('PATCH /tasks/'+id+' failed:', err); });
   },
 
   readNotif: function(id) {
@@ -827,61 +916,108 @@ var S = {
   submitTask: function() {
     var title = document.getElementById('fTitle').value.trim();
     if(!title) { document.getElementById('fTitle').focus(); return; }
-    var t = {
-      id: nextId++,
-      title: title,
-      desc:   document.getElementById('fDesc').value,
-      date:   document.getElementById('fDate').value || isoToday(),
-      status: document.getElementById('fStatus').value,
-      type:   'task',
+    var payload = {
+      event_type: 'task',
+      name:       title,
+      description: document.getElementById('fDesc').value.trim(),
+      event_at:   toEventAt(document.getElementById('fDate').value || isoToday(), '09:00'),
+      status:     document.getElementById('fStatus').value,
     };
-    tasks.unshift(t);
-    document.getElementById('aiText').textContent = 'Задача «'+title+'» создана и добавлена в список.';
     S.closeAdd();
-    // ИНТЕГРАЦИЯ: fetch('/api/tasks', {method:'POST', body:JSON.stringify(t)})
-    // → create_event(user_id, 'task', name, description, datetime) в MCP Server
-    if(state.page==='home')  renderHome();
-    if(state.page==='tasks') renderTasks();
+    document.getElementById('aiText').textContent = 'Создаю задачу «'+title+'»...';
+    apiFetch(BASE_URL+'/tasks', {
+      method:  'POST',
+      headers: {'Content-Type':'application/json'},
+      body:    JSON.stringify(payload),
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      tasks.unshift(mapEvent(data.event));
+      document.getElementById('aiText').textContent = 'Задача «'+title+'» создана.';
+      if(state.page==='home')  renderHome();
+      if(state.page==='tasks') renderTasks();
+    })
+    .catch(function(err){
+      console.warn('POST /tasks failed:', err);
+      // Fallback: добавляем локально
+      tasks.unshift({id:'local-'+Date.now(), title:title,
+        desc:payload.description, date:document.getElementById('fDate').value||isoToday(),
+        status:payload.status, type:'task'});
+      document.getElementById('aiText').textContent = 'Задача «'+title+'» создана (оффлайн).';
+      if(state.page==='home')  renderHome();
+      if(state.page==='tasks') renderTasks();
+    });
   },
   submitProject: function() {
     var title = document.getElementById('pTitle').value.trim();
     if(!title) { document.getElementById('pTitle').focus(); return; }
-    var t = {
-      id: nextId++,
-      title: title,
-      desc:   document.getElementById('pDesc').value,
-      date:   document.getElementById('pDate').value || isoToday(),
-      status: document.getElementById('pStatus').value,
-      type:   'project',
+    var payload = {
+      event_type:  'project',
+      name:        title,
+      description: document.getElementById('pDesc').value.trim(),
+      event_at:    toEventAt(document.getElementById('pDate').value || isoToday(), '09:00'),
+      status:      document.getElementById('pStatus').value,
     };
-    tasks.unshift(t);
-    document.getElementById('aiText').textContent = 'Проект «'+title+'» создан.';
-    document.getElementById('pTitle').value = '';
-    document.getElementById('pDesc').value  = '';
     S.closeAdd();
-    // ИНТЕГРАЦИЯ: fetch('/api/tasks', {method:'POST', body:JSON.stringify(t)})
-    // → create_event(user_id, 'project', name, description, datetime) в MCP Server
-    if(state.page==='home')  renderHome();
-    if(state.page==='tasks') renderTasks();
+    document.getElementById('aiText').textContent = 'Создаю проект «'+title+'»...';
+    apiFetch(BASE_URL+'/tasks', {
+      method:  'POST',
+      headers: {'Content-Type':'application/json'},
+      body:    JSON.stringify(payload),
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      tasks.unshift(mapEvent(data.event));
+      document.getElementById('aiText').textContent = 'Проект «'+title+'» создан.';
+      if(state.page==='home')  renderHome();
+      if(state.page==='tasks') renderTasks();
+    })
+    .catch(function(err){
+      console.warn('POST /tasks (project) failed:', err);
+      tasks.unshift({id:'local-'+Date.now(), title:title,
+        desc:payload.description, date:document.getElementById('pDate').value||isoToday(),
+        status:payload.status, type:'project'});
+      document.getElementById('aiText').textContent = 'Проект «'+title+'» создан (оффлайн).';
+      if(state.page==='home')  renderHome();
+      if(state.page==='tasks') renderTasks();
+    });
   },
 
-  submitMeeting: function() {    var title = document.getElementById('mTitle').value.trim();
+  submitMeeting: function() {
+    var title = document.getElementById('mTitle').value.trim();
     if(!title) { document.getElementById('mTitle').focus(); return; }
-    var t = {
-      id: nextId++,
-      title: title,
-      desc:  document.getElementById('mDesc').value,
-      date:  document.getElementById('mDate').value || isoToday(),
-      time:  document.getElementById('mTime').value || '10:00',
-      status:'new', type:'meeting',
+    var dateVal = document.getElementById('mDate').value || isoToday();
+    var timeVal = document.getElementById('mTime').value || '10:00';
+    var payload = {
+      event_type:  'meeting',
+      name:        title,
+      description: document.getElementById('mDesc').value.trim(),
+      event_at:    toEventAt(dateVal, timeVal),
+      status:      'new',
     };
-    tasks.unshift(t);
-    document.getElementById('aiText').textContent = 'Встреча «'+title+'» запланирована на '+fmtDate(t.date)+' в '+t.time+'.';
     S.closeAdd();
-    // ИНТЕГРАЦИЯ: fetch('/api/tasks', {method:'POST', body:JSON.stringify(t)})
-    // → create_event(user_id, 'meeting', name, description, datetime) в MCP Server
-    if(state.page==='home')  renderHome();
-    if(state.page==='tasks') renderTasks();
+    document.getElementById('aiText').textContent = 'Планирую встречу «'+title+'»...';
+    apiFetch(BASE_URL+'/tasks', {
+      method:  'POST',
+      headers: {'Content-Type':'application/json'},
+      body:    JSON.stringify(payload),
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      tasks.unshift(mapEvent(data.event));
+      document.getElementById('aiText').textContent = 'Встреча «'+title+'» запланирована на '+fmtDate(dateVal)+' в '+timeVal+'.';
+      if(state.page==='home')  renderHome();
+      if(state.page==='tasks') renderTasks();
+    })
+    .catch(function(err){
+      console.warn('POST /tasks (meeting) failed:', err);
+      tasks.unshift({id:'local-'+Date.now(), title:title,
+        desc:payload.description, date:dateVal, time:timeVal,
+        status:'new', type:'meeting'});
+      document.getElementById('aiText').textContent = 'Встреча «'+title+'» запланирована (оффлайн).';
+      if(state.page==='home')  renderHome();
+      if(state.page==='tasks') renderTasks();
+    });
   },
 
   // ── ГОЛОСОВОЙ ВВОД ──
@@ -1052,11 +1188,15 @@ function apiFetch(url, options) {
 
 // ── ЗАПУСК ───────────────────────────────────────────
 function startApp() {
+  // Показываем скелет пока грузим данные
   renderHome();
-  // Пример замены моков на реальный API (раскомментировать при интеграции):
-  // apiFetch('/api/tasks?user_id='+currentUser.id)
-  //   .then(function(r){ return r.json(); })
-  //   .then(function(d){ tasks = d; renderHome(); });
+  // Загружаем реальные данные с API
+  loadTasks(function() {
+    renderHome();
+    // Обновляем текущую страницу если уже переключились
+    if(state.page==='tasks')    renderTasks();
+    if(state.page==='calendar') renderCalendar();
+  });
 }
 
 // Ждём загрузки DOM, затем инициализируем MAX Bridge

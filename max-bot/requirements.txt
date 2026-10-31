@@ -1,3 +1,0 @@
-# Runtime uses only the Python 3.11+ standard library.
-# For IANA timezones other than Europe/Moscow and UTC on Windows:
-tzdata>=2024.1

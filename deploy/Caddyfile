@@ -1,0 +1,11 @@
+{$PUBLIC_DOMAIN} {
+    handle /webhook {
+        reverse_proxy bot:8080
+    }
+    handle /api/* {
+        reverse_proxy api:8002
+    }
+    handle {
+        reverse_proxy miniapp:8080
+    }
+}

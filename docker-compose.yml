@@ -1,0 +1,235 @@
+# Полный стек: PostgreSQL, Valkey (Redis-совместимый), миграции, MCP, Agent (GigaChat), MAX-бот, HTTP API, Mini App.
+# Секреты только через .env (см. .env.example). Сервис asr (GigaAM) включается профилем: --profile gigaam.
+name: gorky-code
+
+x-mcp-image: &mcp-image
+  image: gorky-mcp:local
+  build:
+    context: .
+    dockerfile: mcp_server/Dockerfile
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: assistant_mvp
+      POSTGRES_USER: assistant_owner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Заполните POSTGRES_PASSWORD в .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant_owner -d assistant_mvp"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    # Контекст диалога короткоживущий (TTL 15 минут): на диск не пишем.
+    command: ["valkey-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "127.0.0.1:${VALKEY_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *mcp-image
+    command: ["python", "-m", "app.bootstrap"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: assistant_mvp
+      PGUSER: assistant_owner
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Заполните POSTGRES_PASSWORD в .env}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Заполните APP_DB_PASSWORD в .env}
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD:?Set AGENT_DB_PASSWORD}
+      BOT_DB_PASSWORD: ${BOT_DB_PASSWORD:?Set BOT_DB_PASSWORD}
+      API_DB_PASSWORD: ${API_DB_PASSWORD:?Заполните API_DB_PASSWORD в .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  mcp:
+    <<: *mcp-image
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: assistant_mvp
+      PGUSER: assistant_app
+      PGPASSWORD: ${APP_DB_PASSWORD:?Заполните APP_DB_PASSWORD в .env}
+      REDIS_URL: redis://valkey:6379/0
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?Set MCP_AUTH_TOKEN}
+      MCP_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,mcp:*,agent:*"
+    expose: ["8001"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=4).read()"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    image: gorky-agent:local
+    env_file: .env
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: assistant_mvp
+      PGUSER: assistant_agent
+      PGPASSWORD: ${AGENT_DB_PASSWORD:?Set AGENT_DB_PASSWORD}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?Set MCP_AUTH_TOKEN}
+      MCP_URL: http://mcp:8001/mcp
+      MCP_HEALTH_URL: http://mcp:8001/health
+      REDIS_URL: redis://valkey:6379/0
+      DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-Europe/Moscow}
+    ports:
+      - "127.0.0.1:${AGENT_PORT:-8003}:8003"
+    depends_on:
+      mcp:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    image: gorky-api:local
+    env_file: .env
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: assistant_mvp
+      PGUSER: assistant_api
+      PGPASSWORD: ${API_DB_PASSWORD:?Заполните API_DB_PASSWORD в .env}
+      MAX_BOT_TOKEN: ${MAX_BOT_TOKEN:?Заполните MAX_BOT_TOKEN в .env}
+      AUTH_DEV_MODE: ${AUTH_DEV_MODE:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+    ports:
+      - "127.0.0.1:${API_PORT:-8002}:8002"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    image: gorky-bot:local
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      AGENT_MODE: http
+      AGENT_URL: http://agent:8003/chat
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: assistant_mvp
+      PGUSER: assistant_bot
+      PGPASSWORD: ${BOT_DB_PASSWORD:?Set BOT_DB_PASSWORD}
+      STATE_DB: /app/state/bot.sqlite3
+      GIGAAM_URL: ${GIGAAM_URL:-http://asr:8001/v1/audio/transcriptions}
+    ports:
+      - "127.0.0.1:${BOT_HEALTH_PORT:-8081}:8080"
+    volumes:
+      - bot_state:/app/state
+    depends_on:
+      agent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  miniapp:
+    build:
+      context: .
+      dockerfile: miniapp/Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8002}
+        VITE_BOT_LINK: ${VITE_BOT_LINK:-}
+        VITE_DEV_USER_ID: ${VITE_DEV_USER_ID:-}
+    image: gorky-miniapp:local
+    ports:
+      - "127.0.0.1:${MINIAPP_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  asr:
+    profiles: [gigaam]
+    build:
+      context: bot/asr/gigaam_server
+    image: gorky-asr-gigaam:local
+    environment:
+      API_KEY: ${GIGAAM_API_KEY:-}
+      ENGINES: ${ASR_ENGINES:-gigaam}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - gigaam_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=4).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
+
+  tests:
+    <<: *mcp-image
+    profiles: [tools]
+    command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: assistant_mvp
+      PGUSER: assistant_owner
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Заполните POSTGRES_PASSWORD в .env}
+      ASSISTANT_RUN_DB_TESTS: "1"
+      ASSISTANT_RUN_REDIS_TESTS: "1"
+      REDIS_URL: redis://valkey:6379/0
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Заполните APP_DB_PASSWORD в .env}
+      API_DB_PASSWORD: ${API_DB_PASSWORD:?Заполните API_DB_PASSWORD в .env}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?Set MCP_AUTH_TOKEN}
+      STACK_MCP_URL: http://mcp:8001/mcp
+      STACK_MCP_HEALTH_URL: http://mcp:8001/health
+    depends_on:
+      mcp:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: [https]
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?Set PUBLIC_DOMAIN}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [miniapp, api]
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_data:
+  bot_state:
+  gigaam_cache:

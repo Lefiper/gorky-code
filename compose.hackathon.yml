@@ -1,0 +1,22 @@
+# gorky-hackathon-managed
+x-log: &bounded-log
+  driver: local
+  options: {max-size: "10m", max-file: "3"}
+services:
+  postgres:
+    logging: *bounded-log
+  valkey:
+    logging: *bounded-log
+  mcp:
+    logging: *bounded-log
+  agent:
+    logging: *bounded-log
+    volumes: ["./certs:/app/certs:ro"]
+  api:
+    logging: *bounded-log
+  bot:
+    logging: *bounded-log
+    volumes: ["./certs:/app/certs:ro"]
+  miniapp:
+    logging: *bounded-log
+    volumes: ["./deploy/hackathon-nginx.conf:/etc/nginx/conf.d/default.conf:ro"]

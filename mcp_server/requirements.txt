@@ -1,0 +1,5 @@
+# Initial compatible ranges; exact installed versions go in requirements.lock.txt.
+psycopg[binary,pool]>=3.2,<4
+python-dotenv>=1.0,<2
+fastmcp==4.1.3
+redis==8.1.0

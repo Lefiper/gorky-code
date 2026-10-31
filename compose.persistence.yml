@@ -1,0 +1,9 @@
+# Append to COMPOSE_FILE; existing webhook/HTTPS overrides remain active.
+services:
+  valkey:
+    command: ["valkey-server", "--save", "", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - valkey_data:/data
+volumes:
+  valkey_data:
+    name: gorky-code_valkey_data
